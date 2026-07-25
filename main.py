@@ -31,6 +31,7 @@ from vision_protocol import (
 )
 from yolov8_num_detect import DigitDetector, draw_detections
 
+ENABLE_LINE_TRACKING = False
 LINE_COLOR = "black"
 CAM_FPS = 30
 YOLO_EVERY_N_FRAMES = 2
@@ -109,7 +110,12 @@ def draw_target_roi(img):
 def draw_status(img, machine, line_result, voter, last_event, last_tx):
     scores, counts = voter.scores()
     target_text = "-" if machine.target_number is None else str(machine.target_number)
-    line_text = "OK" if line_result.get("valid") else "LOST"
+    if not ENABLE_LINE_TRACKING:
+        line_text = "OFF"
+    elif line_result.get("valid"):
+        line_text = "OK"
+    else:
+        line_text = "LOST"
     lines = [
         "S:{} T:{} DIR:{}".format(machine.state, target_text, machine.last_direction),
         "LINE:{}".format(line_text),
@@ -363,17 +369,18 @@ class DeliveryController:
             pass
         else:
             # FOLLOW_LINE or WAIT_TURN_DONE
-            line_result = self.line_tracker.process(vision_img)
-            self.last_line_result = line_result
+            if ENABLE_LINE_TRACKING:
+                line_result = self.line_tracker.process(vision_img)
+                self.last_line_result = line_result
 
-            if (state == FOLLOW_LINE
-                    and self.frame_index % LINE_PACKET_EVERY_N_FRAMES == 0):
-                self.send(encode_line_data(
-                    line_result["valid"],
-                    line_result.get("error", 0.0),
-                    line_result.get("angle", 0.0),
-                    line_result.get("center_x_norm", DEFAULT_CENTER_X_NORM),
-                ))
+                if (state == FOLLOW_LINE
+                        and self.frame_index % LINE_PACKET_EVERY_N_FRAMES == 0):
+                    self.send(encode_line_data(
+                        line_result["valid"],
+                        line_result.get("error", 0.0),
+                        line_result.get("angle", 0.0),
+                        line_result.get("center_x_norm", DEFAULT_CENTER_X_NORM),
+                    ))
 
             if state == FOLLOW_LINE and self.machine.target_number not in (1, 2) and run_yolo:
                 self._try_direction_decision(self.last_detections, line_result)
@@ -382,7 +389,7 @@ class DeliveryController:
             draw_detections(model_img, self.last_detections)
             if state == CAPTURE_TARGET:
                 draw_target_roi(model_img)
-            if state in (FOLLOW_LINE, WAIT_TURN_DONE):
+            if ENABLE_LINE_TRACKING and state in (FOLLOW_LINE, WAIT_TURN_DONE):
                 _draw_line_tracking(model_img, line_result)
             self._draw_buttons(model_img)
             draw_status(
