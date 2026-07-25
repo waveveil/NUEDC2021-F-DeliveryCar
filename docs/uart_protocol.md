@@ -153,7 +153,7 @@ cs = 0xAA+0x55+0x08+0x82+0x01+0x05+0x00+0xE6+0x00+0xF4+0x01
 
 | 字段 | 偏移 | 类型 | 字节数 | 说明 |
 |------|------|------|--------|------|
-| direction | 0 | uint8 | 1 | 1 = LEFT（左转），2 = RIGHT（右转） |
+| direction | 0 | uint8 | 1 | 0 = LEFT（左转），1 = RIGHT（右转） |
 | target_number | 1 | uint8 | 1 | 目标房号 1~8 |
 | intersection_index | 2 | uint8 | 1 | 当前第几个路口，从 0 开始。1~2 固定为 0 |
 | confidence | 3 | uint8 | 1 | 方向置信度 0~100。1~2 固定为 100 |
@@ -167,19 +167,19 @@ AA 55  05  83  <dir:1> <tgt:1> <idx:1> <conf:1>  <cs>
 例 1：目标 1 号，固定路线左转（锁定后立即发送）
 
 ```
-Payload = 01 01 00 64
+Payload = 00 01 00 64
 BodyLen = 1 + 4 = 5 → 05
-cs = 0xAA+0x55+0x05+0x83+0x01+0x01+0x00+0x64 = 170+85+5+131+1+1+0+100 = 493 = 0x1ED → 0xED
-帧 = AA 55 05 83 01 01 00 64 ED
+cs = 0xAA+0x55+0x05+0x83+0x00+0x01+0x00+0x64 = 170+85+5+131+0+1+0+100 = 492 = 0x1EC → 0xEC
+帧 = AA 55 05 83 00 01 00 64 EC
 ```
 
 例 2：目标 3 号，在第 1 个路口右转，置信度 85
 
 ```
-Payload = 02 03 01 55
+Payload = 01 03 01 55
 BodyLen = 5
-cs = 0xAA+0x55+0x05+0x83+0x02+0x03+0x01+0x55 = 170+85+5+131+2+3+1+85 = 482 = 0x1E2 → 0xE2
-帧 = AA 55 05 83 02 03 01 55 E2
+cs = 0xAA+0x55+0x05+0x83+0x01+0x03+0x01+0x55 = 170+85+5+131+1+3+1+85 = 481 = 0x1E1 → 0xE1
+帧 = AA 55 05 83 01 03 01 55 E1
 ```
 
 ### 4.4 VISION_HOLD — 视觉暂缓 (0x84)
@@ -341,7 +341,7 @@ void handle_message(uint8_t type, uint8_t *data, uint8_t len) {
 
         case 0x83:  // TURN_DECISION
             if (len >= 4) {
-                uint8_t dir   = data[0];  // 1=LEFT, 2=RIGHT
+                uint8_t dir   = data[0];  // 0=LEFT, 1=RIGHT
                 uint8_t tgt   = data[1];
                 uint8_t idx   = data[2];
                 uint8_t conf  = data[3];
