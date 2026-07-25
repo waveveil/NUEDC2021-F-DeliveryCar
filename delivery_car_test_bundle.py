@@ -519,7 +519,7 @@ class LineTracker:
 
 
 # ============================================================================
-# crossroad_detect_v2.py — blob-based crossroad detector
+# crossroad_detect_v3.py — blob-based crossroad + T-junction detector
 # ============================================================================
 
 IMAGE_CENTER_Y = IMAGE_HEIGHT // 2
@@ -530,6 +530,10 @@ CV2_MAX_BLOB_WIDTH_RATIO = 0.70
 CV2_MAX_BLOB_HEIGHT_RATIO = 0.70
 CV2_FILTER_ALPHA = 0.4
 
+CV3_T_MIN_PIXELS = 30
+CV3_T_CONFIRM_FRAMES = 4
+CV3_T_LOST_FRAMES = 3
+
 MAX_V_SLOPE = 0.577
 MAX_H_SLOPE = 0.577
 MIN_CROSS_ANGLE = 45.0
@@ -537,153 +541,246 @@ MAX_CROSS_CENTER_DIST = 120.0
 CROSS_CONFIRM_FRAMES = 3
 CROSS_LOST_FRAMES = 3
 
+JUNCTION_NONE = "none"
+JUNCTION_CROSSROAD = "crossroad"
+JUNCTION_T_LEFT = "t_left"
+JUNCTION_T_RIGHT = "t_right"
+JUNCTION_T_UP = "t_up"
+JUNCTION_T_DOWN = "t_down"
+
 V_ROI_TOP = [110, 50, 100, 30]
 V_ROI_BOTTOM = [80, 160, 160, 40]
 H_ROI_LEFT = [80, 80, 30, 80]
 H_ROI_RIGHT = [210, 80, 30, 80]
 
 
-def _choose_blob_v(blobs, expected_x, roi_width):
+def _choose_blob_v(blobs, expected_x, roi_width, min_pixels=None):
+    if min_pixels is None:
+        min_pixels = CV2_MIN_PIXELS
     best = None
     best_score = -1000000
     max_blob_width = int(roi_width * CV2_MAX_BLOB_WIDTH_RATIO)
-
     for blob in blobs:
-        if blob.pixels() < CV2_MIN_PIXELS:
+        if blob.pixels() < min_pixels:
             continue
         if blob.w() > max_blob_width:
             continue
-        distance = abs(blob.cx() - expected_x)
-        score = blob.pixels() - distance * 0.8
+        score = blob.pixels() - abs(blob.cx() - expected_x) * 0.8
         if score > best_score:
             best = blob
             best_score = score
     return best
 
 
-def _choose_blob_h(blobs, expected_y, roi_height):
+def _choose_blob_h(blobs, expected_y, roi_height, min_pixels=None):
+    if min_pixels is None:
+        min_pixels = CV2_MIN_PIXELS
     best = None
     best_score = -1000000
     max_blob_height = int(roi_height * CV2_MAX_BLOB_HEIGHT_RATIO)
-
     for blob in blobs:
-        if blob.pixels() < CV2_MIN_PIXELS:
+        if blob.pixels() < min_pixels:
             continue
         if blob.h() > max_blob_height:
             continue
-        distance = abs(blob.cy() - expected_y)
-        score = blob.pixels() - distance * 0.8
+        score = blob.pixels() - abs(blob.cy() - expected_y) * 0.8
         if score > best_score:
             best = blob
             best_score = score
     return best
 
 
-def _detect_vertical_line(img, expected_x, threshold=BLACK_THRESHOLD):
+def _detect_vertical_line(img, expected_x, threshold=BLACK_THRESHOLD, min_pixels=None):
+    if min_pixels is None:
+        min_pixels = CV2_MIN_PIXELS
     top_blobs = img.find_blobs(
         threshold, roi=V_ROI_TOP,
-        area_threshold=CV2_MIN_AREA, pixels_threshold=CV2_MIN_PIXELS,
+        area_threshold=CV2_MIN_AREA, pixels_threshold=min_pixels,
         x_stride=2, y_stride=1,
     )
-    top_blob = _choose_blob_v(top_blobs, expected_x, V_ROI_TOP[2])
-
+    top_blob = _choose_blob_v(top_blobs, expected_x, V_ROI_TOP[2], min_pixels)
     bottom_blobs = img.find_blobs(
         threshold, roi=V_ROI_BOTTOM,
-        area_threshold=CV2_MIN_AREA, pixels_threshold=CV2_MIN_PIXELS,
+        area_threshold=CV2_MIN_AREA, pixels_threshold=min_pixels,
         x_stride=2, y_stride=1,
     )
-    bottom_blob = _choose_blob_v(bottom_blobs, expected_x, V_ROI_BOTTOM[2])
-
+    bottom_blob = _choose_blob_v(bottom_blobs, expected_x, V_ROI_BOTTOM[2], min_pixels)
     if top_blob is None or bottom_blob is None:
         return None
-
     x_top = top_blob.cx()
     y_top = V_ROI_TOP[1] + V_ROI_TOP[3] // 2
     x_bottom = bottom_blob.cx()
     y_bottom = V_ROI_BOTTOM[1] + V_ROI_BOTTOM[3] // 2
-
     dy = y_bottom - y_top
     if abs(dy) < 1:
         return None
     slope = (x_bottom - x_top) / dy
     if abs(slope) > MAX_V_SLOPE:
         return None
-
     return (x_top, y_top, x_bottom, y_bottom, top_blob, bottom_blob)
 
 
-def _detect_horizontal_line(img, expected_y, threshold=BLACK_THRESHOLD):
-    left_blobs = img.find_blobs(
-        threshold, roi=H_ROI_LEFT,
-        area_threshold=CV2_MIN_AREA, pixels_threshold=CV2_MIN_PIXELS,
+def _detect_horizontal_segment(img, roi, expected_y, threshold, min_pixels):
+    blobs = img.find_blobs(
+        threshold, roi=roi,
+        area_threshold=CV2_MIN_AREA, pixels_threshold=min_pixels,
         x_stride=1, y_stride=2,
     )
-    left_blob = _choose_blob_h(left_blobs, expected_y, H_ROI_LEFT[3])
-
-    right_blobs = img.find_blobs(
-        threshold, roi=H_ROI_RIGHT,
-        area_threshold=CV2_MIN_AREA, pixels_threshold=CV2_MIN_PIXELS,
-        x_stride=1, y_stride=2,
-    )
-    right_blob = _choose_blob_h(right_blobs, expected_y, H_ROI_RIGHT[3])
-
-    if left_blob is None or right_blob is None:
+    blob = _choose_blob_h(blobs, expected_y, roi[3], min_pixels)
+    if blob is None:
         return None
+    x = roi[0] + roi[2] // 2
+    y = blob.cy()
+    return (x, y, blob)
 
-    x_left = H_ROI_LEFT[0] + H_ROI_LEFT[2] // 2
-    y_left = left_blob.cy()
-    x_right = H_ROI_RIGHT[0] + H_ROI_RIGHT[2] // 2
-    y_right = right_blob.cy()
 
+def _detect_horizontal_full(img, expected_y, threshold=BLACK_THRESHOLD):
+    left_seg = _detect_horizontal_segment(img, H_ROI_LEFT, expected_y, threshold, CV2_MIN_PIXELS)
+    right_seg = _detect_horizontal_segment(img, H_ROI_RIGHT, expected_y, threshold, CV2_MIN_PIXELS)
+    if left_seg is None or right_seg is None:
+        return None
+    x_left, y_left, left_blob = left_seg
+    x_right, y_right, right_blob = right_seg
     dx = x_right - x_left
     if abs(dx) < 1:
         return None
     slope = (y_right - y_left) / dx
     if abs(slope) > MAX_H_SLOPE:
         return None
-
     return (x_left, y_left, x_right, y_right, left_blob, right_blob)
+
+
+def _detect_horizontal_left(img, expected_y, threshold=BLACK_THRESHOLD):
+    return _detect_horizontal_segment(img, H_ROI_LEFT, expected_y, threshold, CV3_T_MIN_PIXELS)
+
+
+def _detect_horizontal_right(img, expected_y, threshold=BLACK_THRESHOLD):
+    return _detect_horizontal_segment(img, H_ROI_RIGHT, expected_y, threshold, CV3_T_MIN_PIXELS)
+
+
+def _detect_vertical_top(img, expected_x, threshold=BLACK_THRESHOLD):
+    blobs = img.find_blobs(
+        threshold, roi=V_ROI_TOP,
+        area_threshold=CV2_MIN_AREA, pixels_threshold=CV3_T_MIN_PIXELS,
+        x_stride=2, y_stride=1,
+    )
+    blob = _choose_blob_v(blobs, expected_x, V_ROI_TOP[2], CV3_T_MIN_PIXELS)
+    if blob is None:
+        return None
+    return (blob.cx(), V_ROI_TOP[1] + V_ROI_TOP[3] // 2, blob)
+
+
+def _detect_vertical_bottom(img, expected_x, threshold=BLACK_THRESHOLD):
+    blobs = img.find_blobs(
+        threshold, roi=V_ROI_BOTTOM,
+        area_threshold=CV2_MIN_AREA, pixels_threshold=CV3_T_MIN_PIXELS,
+        x_stride=2, y_stride=1,
+    )
+    blob = _choose_blob_v(blobs, expected_x, V_ROI_BOTTOM[2], CV3_T_MIN_PIXELS)
+    if blob is None:
+        return None
+    return (blob.cx(), V_ROI_BOTTOM[1] + V_ROI_BOTTOM[3] // 2, blob)
 
 
 def _line_intersection(v_line, h_line):
     x1, y1, x2, y2 = v_line[0], v_line[1], v_line[2], v_line[3]
     x3, y3, x4, y4 = h_line[0], h_line[1], h_line[2], h_line[3]
-
     v_dx = x2 - x1
     v_dy = y2 - y1
     h_dx = x4 - x3
     h_dy = y4 - y3
-
     v_len = math.hypot(v_dx, v_dy)
     h_len = math.hypot(h_dx, h_dy)
     if v_len < 1 or h_len < 1:
         return None
-
     dot = abs(v_dx * h_dx + v_dy * h_dy)
     cos_angle = _clamp(dot / (v_len * h_len), -1.0, 1.0)
     angle_deg = math.degrees(math.acos(cos_angle))
     if angle_deg > 90:
         angle_deg = 180 - angle_deg
-
     if angle_deg < MIN_CROSS_ANGLE:
         return None
-
     denom = v_dx * h_dy - v_dy * h_dx
     if abs(denom) < 1e-6:
         return None
-
     t = ((x3 - x1) * h_dy - (y3 - y1) * h_dx) / denom
-
     ix = x1 + t * v_dx
     iy = y1 + t * v_dy
-
     if not (0 <= ix < IMAGE_WIDTH and 0 <= iy < IMAGE_HEIGHT):
         return None
-
     center_dist = math.hypot(ix - IMAGE_CENTER_X, iy - IMAGE_CENTER_Y)
     if center_dist > MAX_CROSS_CENTER_DIST:
         return None
+    return int(round(ix)), int(round(iy)), angle_deg
 
+
+def _estimate_t_intersection(v_line, h_seg, side):
+    """T 字路口交点估算（水平单侧：t_left / t_right）。"""
+    if v_line is None or h_seg is None:
+        return None
+    x1, y1, x2, y2 = v_line[0], v_line[1], v_line[2], v_line[3]
+    hx, hy, _blob = h_seg
+    v_dx = x2 - x1
+    v_dy = y2 - y1
+    v_len = math.hypot(v_dx, v_dy)
+    if v_len < 1:
+        return None
+    if abs(v_dy) < 1e-6:
+        return None
+    t = (hy - y1) / v_dy
+    ix = x1 + t * v_dx
+    iy = hy
+    if not (0 <= ix < IMAGE_WIDTH and 0 <= iy < IMAGE_HEIGHT):
+        return None
+    center_dist = math.hypot(ix - IMAGE_CENTER_X, iy - IMAGE_CENTER_Y)
+    if center_dist > MAX_CROSS_CENTER_DIST:
+        return None
+    if side == "left" and hx > ix + 10:
+        return None
+    if side == "right" and hx < ix - 10:
+        return None
+    dot = abs(v_dx * (IMAGE_WIDTH - 1))
+    cos_angle = _clamp(dot / (v_len * max(IMAGE_WIDTH - 1, 1)), -1.0, 1.0)
+    angle_deg = math.degrees(math.acos(cos_angle))
+    if angle_deg > 90:
+        angle_deg = 180 - angle_deg
+    if angle_deg < MIN_CROSS_ANGLE:
+        return None
+    return int(round(ix)), int(round(iy)), angle_deg
+
+
+def _estimate_t_intersection_v(h_line, v_seg, side):
+    """T 字路口交点估算（竖直单侧：t_up / t_down）。"""
+    if h_line is None or v_seg is None:
+        return None
+    x1, y1, x2, y2 = h_line[0], h_line[1], h_line[2], h_line[3]
+    vx, vy, _blob = v_seg
+    h_dx = x2 - x1
+    h_dy = y2 - y1
+    h_len = math.hypot(h_dx, h_dy)
+    if h_len < 1:
+        return None
+    if abs(h_dx) < 1e-6:
+        return None
+    t = (vx - x1) / h_dx
+    ix = vx
+    iy = y1 + t * h_dy
+    if not (0 <= ix < IMAGE_WIDTH and 0 <= iy < IMAGE_HEIGHT):
+        return None
+    center_dist = math.hypot(ix - IMAGE_CENTER_X, iy - IMAGE_CENTER_Y)
+    if center_dist > MAX_CROSS_CENTER_DIST:
+        return None
+    if side == "top" and vy > iy + 10:
+        return None
+    if side == "bottom" and vy < iy - 10:
+        return None
+    dot = abs(h_dy * (IMAGE_HEIGHT - 1))
+    cos_angle = _clamp(dot / (h_len * max(IMAGE_HEIGHT - 1, 1)), -1.0, 1.0)
+    angle_deg = math.degrees(math.acos(cos_angle))
+    if angle_deg > 90:
+        angle_deg = 180 - angle_deg
+    if angle_deg < MIN_CROSS_ANGLE:
+        return None
     return int(round(ix)), int(round(iy)), angle_deg
 
 
@@ -696,27 +793,102 @@ class CrossroadDetector:
 
     def reset(self):
         self.cross_count = 0
-        self.lost_count = 0
-        self.confirmed = False
+        self.cross_lost = 0
+        self.cross_confirmed = False
+        self.t_left_count = 0
+        self.t_left_lost = 0
+        self.t_left_confirmed = False
+        self.t_right_count = 0
+        self.t_right_lost = 0
+        self.t_right_confirmed = False
+        self.t_up_count = 0
+        self.t_up_lost = 0
+        self.t_up_confirmed = False
+        self.t_down_count = 0
+        self.t_down_lost = 0
+        self.t_down_confirmed = False
         self.expected_x = IMAGE_CENTER_X
         self.expected_y = IMAGE_CENTER_Y
         self.filtered_cross_x = float(IMAGE_CENTER_X)
         self.filtered_cross_y = float(IMAGE_CENTER_Y)
         self.filter_initialized = False
 
+    @staticmethod
+    def _update_counters(hit, count, lost, confirm_n, lost_n):
+        if hit:
+            count += 1
+            lost = 0
+        else:
+            lost += 1
+            count = 0
+        confirmed = count >= confirm_n
+        if lost >= lost_n:
+            confirmed = False
+        return count, lost, confirmed
+
     def process(self, img):
         v_line = _detect_vertical_line(img, self.expected_x, self.threshold)
-        h_line = _detect_horizontal_line(img, self.expected_y, self.threshold)
+        h_line = _detect_horizontal_full(img, self.expected_y, self.threshold)
+        h_left = _detect_horizontal_left(img, self.expected_y, self.threshold)
+        h_right = _detect_horizontal_right(img, self.expected_y, self.threshold)
+        v_top = _detect_vertical_top(img, self.expected_x, self.threshold)
+        v_bot = _detect_vertical_bottom(img, self.expected_x, self.threshold)
+
+        cross_hit = (v_line is not None and h_line is not None)
+        t_left_hit = (v_line is not None and h_line is None and h_left is not None)
+        t_right_hit = (v_line is not None and h_line is None and h_right is not None)
+        t_up_hit = (h_line is not None and v_line is None and v_top is not None)
+        t_down_hit = (h_line is not None and v_line is None and v_bot is not None)
+
+        self.cross_count, self.cross_lost, self.cross_confirmed = \
+            self._update_counters(cross_hit, self.cross_count, self.cross_lost,
+                                  CROSS_CONFIRM_FRAMES, CROSS_LOST_FRAMES)
+        self.t_left_count, self.t_left_lost, self.t_left_confirmed = \
+            self._update_counters(t_left_hit, self.t_left_count, self.t_left_lost,
+                                  CV3_T_CONFIRM_FRAMES, CV3_T_LOST_FRAMES)
+        self.t_right_count, self.t_right_lost, self.t_right_confirmed = \
+            self._update_counters(t_right_hit, self.t_right_count, self.t_right_lost,
+                                  CV3_T_CONFIRM_FRAMES, CV3_T_LOST_FRAMES)
+        self.t_up_count, self.t_up_lost, self.t_up_confirmed = \
+            self._update_counters(t_up_hit, self.t_up_count, self.t_up_lost,
+                                  CV3_T_CONFIRM_FRAMES, CV3_T_LOST_FRAMES)
+        self.t_down_count, self.t_down_lost, self.t_down_confirmed = \
+            self._update_counters(t_down_hit, self.t_down_count, self.t_down_lost,
+                                  CV3_T_CONFIRM_FRAMES, CV3_T_LOST_FRAMES)
+
+        junction_type = JUNCTION_NONE
         cross = None
-        if v_line is not None and h_line is not None:
+        score = 0.0
+        h_line_for_output = h_line
+
+        if cross_hit:
+            junction_type = JUNCTION_CROSSROAD
             cross = _line_intersection(v_line, h_line)
+            if v_line is not None and h_line is not None:
+                score = math.hypot(v_line[2] - v_line[0], v_line[3] - v_line[1])
+                score += math.hypot(h_line[2] - h_line[0], h_line[3] - h_line[1])
+        elif t_left_hit:
+            junction_type = JUNCTION_T_LEFT
+            cross = _estimate_t_intersection(v_line, h_left, "left")
+            if v_line is not None:
+                score = math.hypot(v_line[2] - v_line[0], v_line[3] - v_line[1])
+        elif t_right_hit:
+            junction_type = JUNCTION_T_RIGHT
+            cross = _estimate_t_intersection(v_line, h_right, "right")
+            if v_line is not None:
+                score = math.hypot(v_line[2] - v_line[0], v_line[3] - v_line[1])
+        elif t_up_hit:
+            junction_type = JUNCTION_T_UP
+            cross = _estimate_t_intersection_v(h_line, v_top, "top")
+            if h_line is not None:
+                score = math.hypot(h_line[2] - h_line[0], h_line[3] - h_line[1])
+        elif t_down_hit:
+            junction_type = JUNCTION_T_DOWN
+            cross = _estimate_t_intersection_v(h_line, v_bot, "bottom")
+            if h_line is not None:
+                score = math.hypot(h_line[2] - h_line[0], h_line[3] - h_line[1])
 
         if cross is not None:
-            self.cross_count += 1
-            self.lost_count = 0
-            if self.cross_count >= CROSS_CONFIRM_FRAMES:
-                self.confirmed = True
-
             x, y, _ = cross
             if not self.filter_initialized:
                 self.filtered_cross_x = float(x)
@@ -731,37 +903,54 @@ class CrossroadDetector:
                     self.filter_alpha * y
                     + (1.0 - self.filter_alpha) * self.filtered_cross_y
                 )
-        else:
-            self.lost_count += 1
-            self.cross_count = 0
-            if self.lost_count >= CROSS_LOST_FRAMES:
-                self.confirmed = False
 
         if v_line is not None:
             self.expected_x = v_line[2]
+        elif v_bot is not None:
+            self.expected_x = v_bot[0]
+        elif v_top is not None:
+            self.expected_x = v_top[0]
         if h_line is not None:
             self.expected_y = h_line[1]
+        elif h_left is not None:
+            self.expected_y = h_left[1]
+        elif h_right is not None:
+            self.expected_y = h_right[1]
 
+        any_detected = (cross_hit or t_left_hit or t_right_hit or t_up_hit or t_down_hit)
+        any_confirmed = (self.cross_confirmed or self.t_left_confirmed
+                         or self.t_right_confirmed or self.t_up_confirmed
+                         or self.t_down_confirmed)
         x = int(round(self.filtered_cross_x)) if cross is not None else 0
         y = int(round(self.filtered_cross_y)) if cross is not None else 0
         angle = cross[2] if cross is not None else 0.0
-        score = 0.0
-        if v_line is not None and h_line is not None:
-            score = math.hypot(v_line[2] - v_line[0], v_line[3] - v_line[1])
-            score += math.hypot(h_line[2] - h_line[0], h_line[3] - h_line[1])
 
         return {
-            "detected": cross is not None,
-            "confirmed": self.confirmed,
+            "detected": any_detected,
+            "confirmed": any_confirmed,
             "x": x,
             "y": y,
             "center_x_norm": x / IMAGE_WIDTH if cross is not None else None,
             "angle": angle,
             "score": score,
             "v_line": v_line,
-            "h_line": h_line,
+            "h_line": h_line_for_output,
             "cross": cross,
             "cross_count": self.cross_count,
+            "junction_type": junction_type,
+            "crossroad_confirmed": self.cross_confirmed,
+            "t_left_confirmed": self.t_left_confirmed,
+            "t_right_confirmed": self.t_right_confirmed,
+            "t_up_confirmed": self.t_up_confirmed,
+            "t_down_confirmed": self.t_down_confirmed,
+            "h_left": h_left,
+            "h_right": h_right,
+            "v_top": v_top,
+            "v_bot": v_bot,
+            "t_left_hit": t_left_hit,
+            "t_right_hit": t_right_hit,
+            "t_up_hit": t_up_hit,
+            "t_down_hit": t_down_hit,
         }
 
 
@@ -874,8 +1063,33 @@ def _draw_line_tracking(img, line_result):
     )
 
 
+def _draw_extended_cross_line(img, x1, y1, x2, y2, color, thickness):
+    """将两点线段延伸至图像边界绘制。"""
+    sx = img.width() / IMAGE_WIDTH
+    sy = img.height() / IMAGE_HEIGHT
+    dx = x2 - x1
+    dy = y2 - y1
+    if abs(dx) < 1 and abs(dy) < 1:
+        return
+    if abs(dx) >= abs(dy):
+        slope = dy / dx if abs(dx) > 0 else 0
+        xs, xe = 0, IMAGE_WIDTH - 1
+        ys, ye = y1 + slope * (xs - x1), y1 + slope * (xe - x1)
+    else:
+        slope = dx / dy if abs(dy) > 0 else 0
+        ys, ye = 0, IMAGE_HEIGHT - 1
+        xs, xe = x1 + slope * (ys - y1), x1 + slope * (ye - y1)
+    img.draw_line(
+        int(_clamp(xs, 0, IMAGE_WIDTH - 1) * sx),
+        int(_clamp(ys, 0, IMAGE_HEIGHT - 1) * sy),
+        int(_clamp(xe, 0, IMAGE_WIDTH - 1) * sx),
+        int(_clamp(ye, 0, IMAGE_HEIGHT - 1) * sy),
+        color, thickness,
+    )
+
+
 def _draw_crossroad(img, cross_result):
-    """Draw 4 ROIs, V/H detection lines, and cross point."""
+    """Draw 4 ROIs, V/H detection lines, cross point, and T-junction hints."""
     sx = img.width() / IMAGE_WIDTH
     sy = img.height() / IMAGE_HEIGHT
 
@@ -891,32 +1105,47 @@ def _draw_crossroad(img, cross_result):
             color, 1,
         )
 
-    for line_data, color in [
-        (cross_result.get("v_line"), image.COLOR_GREEN),
-        (cross_result.get("h_line"), image.COLOR_YELLOW),
-    ]:
-        if line_data is None:
-            continue
-        x1, y1, x2, y2 = line_data[0], line_data[1], line_data[2], line_data[3]
-        if abs(x2 - x1) > abs(y2 - y1):
-            if abs(x2 - x1) < 1:
-                continue
-            slope = (y2 - y1) / (x2 - x1)
-            xs, xe = 0, IMAGE_WIDTH - 1
-            ys, ye = y1 + slope * (xs - x1), y1 + slope * (xe - x1)
-        else:
-            if abs(y2 - y1) < 1:
-                continue
-            slope = (x2 - x1) / (y2 - y1)
-            ys, ye = 0, IMAGE_HEIGHT - 1
-            xs, xe = x1 + slope * (ys - y1), x1 + slope * (ye - y1)
-        img.draw_line(
-            int(_clamp(xs, 0, IMAGE_WIDTH - 1) * sx),
-            int(_clamp(ys, 0, IMAGE_HEIGHT - 1) * sy),
-            int(_clamp(xe, 0, IMAGE_WIDTH - 1) * sx),
-            int(_clamp(ye, 0, IMAGE_HEIGHT - 1) * sy),
-            color, 3,
-        )
+    # 完整竖直线
+    v_line = cross_result.get("v_line")
+    if v_line is not None:
+        x1, y1, x2, y2 = v_line[0], v_line[1], v_line[2], v_line[3]
+        _draw_extended_cross_line(img, x1, y1, x2, y2, image.COLOR_GREEN, 3)
+
+    # 完整水平线
+    h_line = cross_result.get("h_line")
+    if h_line is not None:
+        x1, y1, x2, y2 = h_line[0], h_line[1], h_line[2], h_line[3]
+        _draw_extended_cross_line(img, x1, y1, x2, y2, image.COLOR_YELLOW, 3)
+
+    # T 字 — 水平单侧色块（有竖线无完整水平线时）
+    if h_line is None and v_line is not None:
+        for h_seg, color in [
+            (cross_result.get("h_left"), image.COLOR_YELLOW),
+            (cross_result.get("h_right"), image.COLOR_YELLOW),
+        ]:
+            if h_seg is not None:
+                x, y, _blob = h_seg
+                img.draw_cross(int(x * sx), int(y * sy), image.COLOR_RED, 8, 2)
+                img.draw_line(
+                    int(_clamp(x - 40, 0, IMAGE_WIDTH - 1) * sx), int(y * sy),
+                    int(_clamp(x + 40, 0, IMAGE_WIDTH - 1) * sx), int(y * sy),
+                    color, 2,
+                )
+
+    # T 字 — 竖直单侧色块（有水平线无完整竖直线时）
+    if v_line is None and h_line is not None:
+        for v_seg, color in [
+            (cross_result.get("v_top"), image.COLOR_GREEN),
+            (cross_result.get("v_bot"), image.COLOR_GREEN),
+        ]:
+            if v_seg is not None:
+                x, y, _blob = v_seg
+                img.draw_cross(int(x * sx), int(y * sy), image.COLOR_RED, 8, 2)
+                img.draw_line(
+                    int(x * sx), int(_clamp(y - 40, 0, IMAGE_HEIGHT - 1) * sy),
+                    int(x * sx), int(_clamp(y + 40, 0, IMAGE_HEIGHT - 1) * sy),
+                    color, 2,
+                )
 
     cross = cross_result.get("cross")
     if cross is not None:
@@ -924,6 +1153,11 @@ def _draw_crossroad(img, cross_result):
         c = image.COLOR_RED if cross_result.get("confirmed") else image.COLOR_WHITE
         img.draw_cross(int(x * sx), int(y * sy), c, 14, 3)
         img.draw_circle(int(x * sx), int(y * sy), int(18 * min(sx, sy)), c, 2)
+        jtype = cross_result.get("junction_type", "")
+        if jtype:
+            label = {"crossroad": "+", "t_left": "TL", "t_right": "TR",
+                     "t_up": "TU", "t_down": "TD"}.get(jtype, jtype)
+            img.draw_string(int(x * sx) + 22, int(y * sy) - 8, label, c, 1.0)
 
 
 # ============================================================================
@@ -1001,7 +1235,10 @@ def _draw_status(img, machine, line_result, cross_result, voter, last_event, las
     scores, counts = voter.scores()
     target_text = "-" if machine.target_number is None else str(machine.target_number)
     line_text = "OK" if line_result.get("valid") else "LOST"
-    cross_text = "OK" if cross_result.get("confirmed") else "---"
+    jtype = cross_result.get("junction_type", "")
+    jtype_short = {"crossroad": "+", "t_left": "TL", "t_right": "TR",
+                   "t_up": "TU", "t_down": "TD"}.get(jtype, "")
+    cross_text = jtype_short if cross_result.get("confirmed") else "---"
     lines = [
         "S:{} T:{} DIR:{}".format(machine.state, target_text, machine.last_direction),
         "LINE:{} CROSS:{}".format(line_text, cross_text),

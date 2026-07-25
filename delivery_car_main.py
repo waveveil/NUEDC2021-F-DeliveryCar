@@ -1,16 +1,7 @@
 from maix import app, camera, display, err, image, pinmap, time, touchscreen, uart
 
-from crossroad_detect_v2 import (
-    H_ROI_LEFT,
-    H_ROI_RIGHT,
-    IMAGE_CENTER_Y,
-    V_ROI_BOTTOM,
-    V_ROI_TOP,
-    CrossroadDetector,
-)
 from delivery_logic import (
     CAPTURE_TARGET,
-    DECIDE_DIRECTION,
     FOLLOW_LINE,
     LEFT,
     RIGHT,
@@ -29,26 +20,22 @@ from track_line import (
     ROIS,
     TARGET_Y,
     LineTracker,
-    clamp,
 )
 from vision_protocol import (
-    HOLD_DIRECTION_UNCERTAIN,
-    HOLD_FIXED_ROUTE_MISSING,
     FrameParser,
     MessageType,
     encode_line_data,
     encode_status,
     encode_target_locked,
     encode_turn_decision,
-    encode_vision_hold,
 )
 from yolov8_num_detect import DigitDetector, draw_detections
 
 LINE_COLOR = "black"
 CAM_FPS = 30
-YOLO_EVERY_N_FRAMES = 2#每2帧运行一次yolo（普通状态下）
-DISPLAY_EVERY_N_FRAMES = 2#每2帧刷新一次屏幕
-LINE_PACKET_EVERY_N_FRAMES = 2#每2帧发送一次巡线包
+YOLO_EVERY_N_FRAMES = 2
+DISPLAY_EVERY_N_FRAMES = 2
+LINE_PACKET_EVERY_N_FRAMES = 2
 
 BTN_HEIGHT = 42
 BTN_GAP = 4
@@ -71,28 +58,25 @@ _TX_TYPE_NAMES = {
 
 UART_DEVICE = "/dev/ttyS0"
 UART_BAUDRATE = 115200
-#启动时识别数字牌的归一化区域
 TARGET_ROI = (0.20, 0.10, 0.80, 0.90)
-#备用数字左右判断依据为屏幕的中心
 DEFAULT_CENTER_X_NORM = 0.50
 
 FIXED_ROUTES = {
-    1: [LEFT],#目标为1号时，第0个路口左转
-    2: [RIGHT],#右转
+    1: [LEFT],
+    2: [RIGHT],
 }
-#状态字符串映射成整数
+
 STATE_CODES = {
     CAPTURE_TARGET: 1,
     WAIT_START: 2,
     FOLLOW_LINE: 3,
-    DECIDE_DIRECTION: 4,
     WAIT_TURN_DONE: 5,
 }
 
 
 def setup_uart():
-    err.check_raise(pinmap.set_pin_function("A16", "UART1_TX"), "A16 UART1_TX")
-    err.check_raise(pinmap.set_pin_function("A17", "UART1_RX"), "A17 UART1_RX")
+    err.check_raise(pinmap.set_pin_function("A16", "UART0_TX"), "A16 UART0_TX")
+    err.check_raise(pinmap.set_pin_function("A17", "UART0_RX"), "A17 UART0_RX")
     return uart.UART(UART_DEVICE, UART_BAUDRATE)
 
 
@@ -122,14 +106,13 @@ def draw_target_roi(img):
     img.draw_rect(x, y, width, height, image.COLOR_BLUE, 2)
 
 
-def draw_status(img, machine, line_result, cross_result, voter, last_event, last_tx):
+def draw_status(img, machine, line_result, voter, last_event, last_tx):
     scores, counts = voter.scores()
     target_text = "-" if machine.target_number is None else str(machine.target_number)
     line_text = "OK" if line_result.get("valid") else "LOST"
-    cross_text = "OK" if cross_result.get("confirmed") else "---"
     lines = [
         "S:{} T:{} DIR:{}".format(machine.state, target_text, machine.last_direction),
-        "LINE:{} CROSS:{}".format(line_text, cross_text),
+        "LINE:{}".format(line_text),
         "V L:{}/{:.1f} R:{}/{:.1f}".format(
             counts[LEFT],
             scores[LEFT],
@@ -175,62 +158,10 @@ def _draw_line_tracking(img, line_result):
     )
 
 
-def _draw_crossroad(img, cross_result):
-    sx = img.width() / IMAGE_WIDTH
-    sy = img.height() / IMAGE_HEIGHT
-
-    for roi, color in [
-        (V_ROI_TOP, image.COLOR_BLUE),
-        (V_ROI_BOTTOM, image.COLOR_BLUE),
-        (H_ROI_LEFT, image.COLOR_GRAY),
-        (H_ROI_RIGHT, image.COLOR_GRAY),
-    ]:
-        img.draw_rect(
-            int(roi[0] * sx), int(roi[1] * sy),
-            int(roi[2] * sx), int(roi[3] * sy),
-            color, 1,
-        )
-
-    for line_data, color in [
-        (cross_result.get("v_line"), image.COLOR_GREEN),
-        (cross_result.get("h_line"), image.COLOR_YELLOW),
-    ]:
-        if line_data is None:
-            continue
-        x1, y1, x2, y2 = line_data[0], line_data[1], line_data[2], line_data[3]
-        if abs(x2 - x1) > abs(y2 - y1):
-            if abs(x2 - x1) < 1:
-                continue
-            slope = (y2 - y1) / (x2 - x1)
-            xs, xe = 0, IMAGE_WIDTH - 1
-            ys, ye = y1 + slope * (xs - x1), y1 + slope * (xe - x1)
-        else:
-            if abs(y2 - y1) < 1:
-                continue
-            slope = (x2 - x1) / (y2 - y1)
-            ys, ye = 0, IMAGE_HEIGHT - 1
-            xs, xe = x1 + slope * (ys - y1), x1 + slope * (ye - y1)
-        img.draw_line(
-            int(clamp(xs, 0, IMAGE_WIDTH - 1) * sx),
-            int(clamp(ys, 0, IMAGE_HEIGHT - 1) * sy),
-            int(clamp(xe, 0, IMAGE_WIDTH - 1) * sx),
-            int(clamp(ye, 0, IMAGE_HEIGHT - 1) * sy),
-            color, 3,
-        )
-
-    cross = cross_result.get("cross")
-    if cross is not None:
-        x, y, _angle = cross
-        c = image.COLOR_RED if cross_result.get("confirmed") else image.COLOR_WHITE
-        img.draw_cross(int(x * sx), int(y * sy), c, 14, 3)
-        img.draw_circle(int(x * sx), int(y * sy), int(18 * min(sx, sy)), c, 2)
-
-
 class DeliveryController:
     def __init__(self):
         self.digit_detector = DigitDetector(dual_buff=False)
         self.line_tracker = LineTracker(LINE_COLOR)
-        self.crossroad_detector = CrossroadDetector(LINE_COLOR)
         self.target_locker = TargetLocker(roi=TARGET_ROI)
         self.direction_voter = DirectionVoter()
         self.machine = DeliveryStateMachine()
@@ -250,8 +181,6 @@ class DeliveryController:
         self.last_tx = "-"
         self.last_detections = []
         self.last_line_result = {"valid": False}
-        self.last_cross_result = {"detected": False, "confirmed": False}
-        self.hold_sent = False
         self._btn_rects_disp = {}
         self._btn_rects_computed = False
 
@@ -260,13 +189,10 @@ class DeliveryController:
         self.target_locker.reset()
         self.direction_voter.clear()
         self.line_tracker.reset()
-        self.crossroad_detector.reset()
         self.parser.clear()
         self.intersection_index = 0
         self.last_detections = []
         self.last_line_result = {"valid": False}
-        self.last_cross_result = {"detected": False, "confirmed": False}
-        self.hold_sent = False
 
     def send(self, packet):
         self.uart_dev.write(packet)
@@ -290,22 +216,17 @@ class DeliveryController:
                 self.last_uart_event = "STOP"
                 self.machine.stop()
                 self.direction_voter.clear()
-                self.hold_sent = False
                 self.send_state()
             elif message_type == MessageType.START:
                 self.last_uart_event = "START"
                 if self.machine.start():
                     self.direction_voter.clear()
                     self.line_tracker.reset()
-                    self.crossroad_detector.reset()
-                    self.hold_sent = False
                     self.send_state()
             elif message_type == MessageType.TURN_DONE:
                 self.last_uart_event = "TURN_DONE"
                 if self.machine.turn_done():
                     self.direction_voter.clear()
-                    self.crossroad_detector.reset()
-                    self.hold_sent = False
                     self.send_state()
 
     def _compute_buttons(self, img_w, img_h):
@@ -361,75 +282,61 @@ class DeliveryController:
             self.last_uart_event = "STOP"
             self.machine.stop()
             self.direction_voter.clear()
-            self.hold_sent = False
             self.send_state()
         elif label == "START":
             self.last_uart_event = "START"
             if self.machine.start():
                 self.direction_voter.clear()
                 self.line_tracker.reset()
-                self.crossroad_detector.reset()
-                self.hold_sent = False
                 self.send_state()
         elif label == "TURN_DONE":
             self.last_uart_event = "TURN_DONE"
             if self.machine.turn_done():
                 self.direction_voter.clear()
-                self.crossroad_detector.reset()
-                self.hold_sent = False
                 self.send_state()
 
     def update_target(self, detections):
         target = self.target_locker.update(detections)
         if target is not None and self.machine.lock_target(target):
+            self.last_detections = []
             self.send(encode_target_locked(target))
             self.last_uart_event = "TARGET_LOCKED"
+            if target in FIXED_ROUTES:
+                direction = fixed_route_direction(target, 0, FIXED_ROUTES)
+                if direction in (LEFT, RIGHT):
+                    self.machine.last_direction = direction
+                    self.send(encode_turn_decision(
+                        direction,
+                        target_number=target,
+                        intersection_index=0,
+                        confidence=100,
+                    ))
+                    self.last_uart_event = "TARGET_LOCKED+DIR"
             self.send_state()
 
-    def road_center(self, line_result, cross_result):
-        if cross_result.get("confirmed") and cross_result.get("center_x_norm") is not None:
-            return cross_result["center_x_norm"]
-        if line_result.get("valid"):
-            return line_result["decision_center_x_norm"]
-        return DEFAULT_CENTER_X_NORM
-
-    def update_direction_votes(self, detections, line_result, cross_result):
-        if self.machine.target_number in (1, 2):
+    def _try_direction_decision(self, detections, line_result):
+        """For targets 3-8: feed voter and send TURN_DECISION when ready."""
+        if self.machine.target_number in (None, 1, 2):
             return
-        center = self.road_center(line_result, cross_result)
-        self.direction_voter.add(detections, self.machine.target_number, center)
 
-    def fixed_direction(self):
-        return fixed_route_direction(
-            self.machine.target_number,
-            self.intersection_index,
-            FIXED_ROUTES,
+        center = (
+            line_result.get("decision_center_x_norm", DEFAULT_CENTER_X_NORM)
+            if line_result.get("valid")
+            else DEFAULT_CENTER_X_NORM
         )
-
-    def decide_direction(self):
-        if self.machine.target_number in (1, 2):
-            direction = self.fixed_direction()
-            hold_reason = HOLD_FIXED_ROUTE_MISSING
-        else:
-            direction = self.direction_voter.decision()
-            hold_reason = HOLD_DIRECTION_UNCERTAIN
-
+        self.direction_voter.add(detections, self.machine.target_number, center)
+        direction = self.direction_voter.decision()
         if direction in (LEFT, RIGHT) and self.machine.lock_direction(direction):
+            self.last_detections = []
             confidence = direction_confidence(self.direction_voter, direction)
-            self.send(
-                encode_turn_decision(
-                    direction,
-                    target_number=self.machine.target_number,
-                    intersection_index=self.intersection_index,
-                    confidence=confidence,
-                )
-            )
+            self.send(encode_turn_decision(
+                direction,
+                target_number=self.machine.target_number,
+                intersection_index=self.intersection_index,
+                confidence=confidence,
+            ))
             self.intersection_index += 1
-            self.hold_sent = False
             self.send_state()
-        elif direction == UNKNOWN and not self.hold_sent:
-            self.send(encode_vision_hold(hold_reason))
-            self.hold_sent = True
 
     def process_frame(self):
         self.receive_uart()
@@ -437,62 +344,51 @@ class DeliveryController:
         vision_img = prepare_vision_image(model_img)
         self.frame_index += 1
 
-        run_yolo = (
-            self.machine.state in (CAPTURE_TARGET, DECIDE_DIRECTION)
-            or self.frame_index % YOLO_EVERY_N_FRAMES == 0
-        )
+        state = self.machine.state
+
+        run_yolo = False
+        if state == CAPTURE_TARGET:
+            run_yolo = True
+        elif state == FOLLOW_LINE and self.machine.target_number not in (1, 2):
+            run_yolo = self.frame_index % YOLO_EVERY_N_FRAMES == 0
+
         if run_yolo:
             self.last_detections = self.digit_detector.detect(model_img)
 
-        if self.machine.state == CAPTURE_TARGET:
+        line_result = {"valid": False}
+
+        if state == CAPTURE_TARGET:
             self.update_target(self.last_detections)
-            line_result = {"valid": False}
-            cross_result = {"detected": False, "confirmed": False}
-        elif self.machine.state == WAIT_START:
-            line_result = {"valid": False}
-            cross_result = {"detected": False, "confirmed": False}
+        elif state == WAIT_START:
+            pass
         else:
+            # FOLLOW_LINE or WAIT_TURN_DONE
             line_result = self.line_tracker.process(vision_img)
-            cross_result = self.crossroad_detector.process(vision_img)
             self.last_line_result = line_result
-            self.last_cross_result = cross_result
 
-            if (
-                self.machine.state in (FOLLOW_LINE, DECIDE_DIRECTION)
-                and self.frame_index % LINE_PACKET_EVERY_N_FRAMES == 0
-            ):
-                self.send(
-                    encode_line_data(
-                        line_result["valid"],
-                        line_result.get("error", 0.0),
-                        line_result.get("angle", 0.0),
-                        line_result.get("center_x_norm", DEFAULT_CENTER_X_NORM),
-                    )
-                )
+            if (state == FOLLOW_LINE
+                    and self.frame_index % LINE_PACKET_EVERY_N_FRAMES == 0):
+                self.send(encode_line_data(
+                    line_result["valid"],
+                    line_result.get("error", 0.0),
+                    line_result.get("angle", 0.0),
+                    line_result.get("center_x_norm", DEFAULT_CENTER_X_NORM),
+                ))
 
-            if self.machine.state in (FOLLOW_LINE, DECIDE_DIRECTION) and run_yolo:
-                self.update_direction_votes(self.last_detections, line_result, cross_result)
-
-            self.machine.update_crossroad_visibility(cross_result["detected"])
-            if cross_result["confirmed"] and cross_result["detected"]:
-                if self.machine.trigger_crossroad():
-                    self.send_state()
-            if self.machine.state == DECIDE_DIRECTION:
-                self.decide_direction()
+            if state == FOLLOW_LINE and self.machine.target_number not in (1, 2) and run_yolo:
+                self._try_direction_decision(self.last_detections, line_result)
 
         if self.frame_index % DISPLAY_EVERY_N_FRAMES == 0:
             draw_detections(model_img, self.last_detections)
-            if self.machine.state == CAPTURE_TARGET:
+            if state == CAPTURE_TARGET:
                 draw_target_roi(model_img)
-            if self.machine.state in (FOLLOW_LINE, DECIDE_DIRECTION, WAIT_TURN_DONE):
+            if state in (FOLLOW_LINE, WAIT_TURN_DONE):
                 _draw_line_tracking(model_img, line_result)
-                _draw_crossroad(model_img, cross_result)
             self._draw_buttons(model_img)
             draw_status(
                 model_img,
                 self.machine,
                 line_result,
-                cross_result,
                 self.direction_voter,
                 self.last_uart_event,
                 self.last_tx,

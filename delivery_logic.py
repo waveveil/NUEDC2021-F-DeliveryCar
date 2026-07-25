@@ -222,16 +222,12 @@ def fixed_route_direction(target_number, route_index, routes):
 
 
 class DeliveryStateMachine:
-    def __init__(self, clear_frames_required=3):
-        self.clear_frames_required = clear_frames_required
+    def __init__(self):
         self.reset()
 
     def reset(self):
         self.state = CAPTURE_TARGET
         self.target_number = None
-        self.crossroad_armed = True
-        self.waiting_for_clear = False
-        self.clear_frames = 0
         self.last_direction = UNKNOWN
 
     def lock_target(self, target_number):
@@ -245,27 +241,14 @@ class DeliveryStateMachine:
         if self.state != WAIT_START or self.target_number is None:
             return False
         self.state = FOLLOW_LINE
-        self.crossroad_armed = True
-        self.waiting_for_clear = False
-        self.clear_frames = 0
         return True
 
     def stop(self):
         self.state = WAIT_START if self.target_number is not None else CAPTURE_TARGET
-        self.crossroad_armed = True
-        self.waiting_for_clear = False
-        self.clear_frames = 0
         self.last_direction = UNKNOWN
 
-    def trigger_crossroad(self):
-        if self.state != FOLLOW_LINE or not self.crossroad_armed:
-            return False
-        self.crossroad_armed = False
-        self.state = DECIDE_DIRECTION
-        return True
-
     def lock_direction(self, direction):
-        if self.state != DECIDE_DIRECTION or direction not in (LEFT, RIGHT):
+        if self.state not in (FOLLOW_LINE, DECIDE_DIRECTION) or direction not in (LEFT, RIGHT):
             return False
         self.last_direction = direction
         self.state = WAIT_TURN_DONE
@@ -275,18 +258,4 @@ class DeliveryStateMachine:
         if self.state != WAIT_TURN_DONE:
             return False
         self.state = FOLLOW_LINE
-        self.waiting_for_clear = True
-        self.clear_frames = 0
         return True
-
-    def update_crossroad_visibility(self, present):
-        if not self.waiting_for_clear:
-            return self.crossroad_armed
-        if present:
-            self.clear_frames = 0
-            return False
-        self.clear_frames += 1
-        if self.clear_frames >= self.clear_frames_required:
-            self.waiting_for_clear = False
-            self.crossroad_armed = True
-        return self.crossroad_armed
