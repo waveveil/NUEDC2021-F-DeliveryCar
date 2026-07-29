@@ -217,23 +217,19 @@ class DeliveryController:
             if message_type == MessageType.RESET:
                 self.last_uart_event = "RESET"
                 self.reset()
-                self.send_state()
             elif message_type == MessageType.STOP:
                 self.last_uart_event = "STOP"
                 self.machine.stop()
                 self.direction_voter.clear()
-                self.send_state()
             elif message_type == MessageType.START:
                 self.last_uart_event = "START"
                 if self.machine.start():
                     self.direction_voter.clear()
                     self.line_tracker.reset()
-                    self.send_state()
             elif message_type == MessageType.TURN_DONE:
                 self.last_uart_event = "TURN_DONE"
                 if self.machine.turn_done():
                     self.direction_voter.clear()
-                    self.send_state()
 
     def _compute_buttons(self, img_w, img_h):
         n = len(BTN_LABELS)
@@ -283,23 +279,19 @@ class DeliveryController:
         if label == "RESET":
             self.last_uart_event = "RESET"
             self.reset()
-            self.send_state()
         elif label == "STOP":
             self.last_uart_event = "STOP"
             self.machine.stop()
             self.direction_voter.clear()
-            self.send_state()
         elif label == "START":
             self.last_uart_event = "START"
             if self.machine.start():
                 self.direction_voter.clear()
                 self.line_tracker.reset()
-                self.send_state()
         elif label == "TURN_DONE":
             self.last_uart_event = "TURN_DONE"
             if self.machine.turn_done():
                 self.direction_voter.clear()
-                self.send_state()
 
     def update_target(self, detections):
         target = self.target_locker.update(detections)
@@ -318,7 +310,6 @@ class DeliveryController:
                         confidence=100,
                     ))
                     self.last_uart_event = "TARGET_LOCKED+DIR"
-            self.send_state()
 
     def _try_direction_decision(self, detections, line_result):
         """For targets 3-8: feed voter and send TURN_DECISION when ready."""
@@ -342,7 +333,6 @@ class DeliveryController:
                 confidence=confidence,
             ))
             self.intersection_index += 1
-            self.send_state()
 
     def process_frame(self):
         self.receive_uart()
@@ -403,7 +393,6 @@ class DeliveryController:
             self.disp.show(model_img)
 
     def run(self):
-        self.send_state()
         pressed_already = False
         while not app.need_exit():
             x, y, pressed = self.ts.read()
